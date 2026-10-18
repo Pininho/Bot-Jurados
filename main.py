@@ -305,8 +305,56 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
             temp_path = tf.name
-        new_file = await context.bot.get_file(file_obj.file_id)
-        await new_file.download_to_drive(temp_path)
+
+        file_size = getattr(file_obj, 'file_size', 0) or 0
+        is_too_big = file_size > 19 * 1024 * 1024  # Telegram Bot API limite ~20MB
+
+        downloaded = False
+        # Si es muy grande, intentar primero con Telethon (si tienes SESSION_STRING configurado)
+        if is_too_big and user_client:
+            try:
+                await update.message.reply_text(f"📦 Video pesa {file_size/1024/1024:.1f}MB (>20MB), bajando con Telethon para archivos grandes...")
+                tele_path = await download_via_telethon(chat_id, message.message_id)
+                if tele_path and os.path.exists(tele_path):
+                    # mover a temp_path esperado
+                    import shutil
+                    shutil.move(tele_path, temp_path)
+                    downloaded = True
+                    print(f"✅ Bajado via Telethon grande: {temp_path} {os.path.getsize(temp_path)} bytes")
+            except Exception as tele_e:
+                print(f"Telethon grande fallo: {tele_e}")
+                # seguir a intentar bot api que dara error controlado abajo
+
+        if not downloaded:
+            try:
+                new_file = await context.bot.get_file(file_obj.file_id)
+                await new_file.download_to_drive(temp_path)
+                downloaded = True
+            except Exception as getfile_e:
+                # Si falla por File is too big, intentar Telethon como respaldo
+                if "too big" in str(getfile_e).lower() or "file is too big" in str(getfile_e).lower():
+                    if user_client:
+                        try:
+                            await update.message.reply_text(f"📦 Telegram dice 'File is too big' ({file_size/1024/1024:.1f}MB). Intentando con Telethon...")
+                            tele_path = await download_via_telethon(chat_id, message.message_id)
+                            if tele_path and os.path.exists(tele_path):
+                                import shutil
+                                shutil.move(tele_path, temp_path)
+                                downloaded = True
+                                print(f"✅ Bajado via Telethon fallback: {temp_path}")
+                            else:
+                                raise getfile_e
+                        except Exception as tele2_e:
+                            print(f"Telethon fallback fallo: {tele2_e}")
+                            raise getfile_e
+                    else:
+                        raise getfile_e
+                else:
+                    raise getfile_e
+
+        if not downloaded or not os.path.exists(temp_path):
+            raise Exception("No se pudo descargar el archivo")
+
         last_media[chat_id] = temp_path
         # Limpiar identificación anterior para no arrastrar nombres de batallas pasadas - cada archivo es batalla nueva
         if chat_id in last_media_names:
@@ -344,7 +392,20 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ Error guardando media {chat_id}: {e}")
         import traceback; traceback.print_exc()
-        await update.message.reply_text(f"❌ Error guardando: {e}")
+        err_low = str(e).lower()
+        if "too big" in err_low or "file is too big" in err_low:
+            size_mb = (file_size / 1024 / 1024) if 'file_size' in locals() and file_size else 0
+            await update.message.reply_text(
+                f"❌ Video pesa {size_mb:.1f}MB, Telegram no deja bajar archivos >20MB con bots.\n\n"
+                "Soluciones rápidas (elige 1):\n"
+                "1️⃣ Mándalo como VIDEO (no como archivo/documento) y Telegram lo comprime solo\n"
+                "2️⃣ Córtalo en 2 partes <20MB cada una\n"
+                "3️⃣ Comprímelo a 480p antes de enviar\n"
+                "4️⃣ Si quieres que baje hasta 2GB, activa Telethon: pon API_ID, API_HASH y SESSION_STRING en Render > Environment\n\n"
+                "Por ahora, mándalo como VIDEO normal, no como documento."
+            )
+        else:
+            await update.message.reply_text(f"❌ Error guardando: {e}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
