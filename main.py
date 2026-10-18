@@ -9,7 +9,6 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
-from flask import Flask
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -41,24 +40,6 @@ last_media = {}
 last_uploaded_files = {}
 last_media_names = {}  # chat_id -> texto con quien es quien dado por usuario
 last_media_type = {}  # chat_id -> 'video' o 'audio'
-
-# --- FLASK HEALTH SERVER PARA RENDER (pa que no se duerma) ---
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return "✅ Bot Jurado Running 24/7 - OK"
-
-@flask_app.route('/health')
-def health():
-    return "OK", 200
-
-def run_flask():
-    port = int(os.getenv("PORT", "10000"))
-    print(f"🌐 Flask health server en puerto {port}")
-    flask_app.run(host='0.0.0.0', port=port)
-
-
 
 # --- CUOTA TRACKING ---
 import json
@@ -976,13 +957,25 @@ def main():
     if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
         print("Faltan TELEGRAM_TOKEN o GEMINI_API_KEY")
         return
+    # --- Mini web server para Render (free web service necesita puerto abierto) ---
     import threading
-    try:
-        t = threading.Thread(target=run_flask, daemon=True)
-        t.start()
-        print("✅ Flask thread iniciado para Render")
-    except Exception as e:
-        print(f"Flask no pudo iniciar: {e}")
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    class KeepAliveHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type","text/plain")
+            self.end_headers()
+            self.wfile.write(b"Bot Jurados Live")
+        def log_message(self, *args):
+            return
+    def run_web():
+        port = int(os.getenv("PORT", 10000))
+        try:
+            HTTPServer(("0.0.0.0", port), KeepAliveHandler).serve_forever()
+        except Exception as e:
+            print(f"Web server error: {e}")
+    threading.Thread(target=run_web, daemon=True).start()
+    print(f"🌐 Mini web server en puerto {os.getenv('PORT', 10000)} para Render")
 
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start_command))
