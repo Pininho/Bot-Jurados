@@ -954,10 +954,7 @@ EN QUE MEJORAR:
     return
 
 def main():
-    if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
-        print("Faltan TELEGRAM_TOKEN o GEMINI_API_KEY")
-        return
-    # --- Mini web server para Render (free web service necesita puerto abierto) ---
+    # --- Mini web server para Render (debe abrir SIEMPRE, aunque falte token) ---
     import threading
     from http.server import HTTPServer, BaseHTTPRequestHandler
     class KeepAliveHandler(BaseHTTPRequestHandler):
@@ -976,6 +973,14 @@ def main():
             print(f"Web server error: {e}")
     threading.Thread(target=run_web, daemon=True).start()
     print(f"🌐 Mini web server en puerto {os.getenv('PORT', 10000)} para Render")
+
+    if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
+        print("Faltan TELEGRAM_TOKEN o GEMINI_API_KEY - revisa Environment en Render")
+        # No retornamos, dejamos el web server vivo para que Render no marque Failed
+        # Esperamos para que no crashee
+        import time
+        while True:
+            time.sleep(3600)
 
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start_command))
