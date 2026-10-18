@@ -954,7 +954,7 @@ EN QUE MEJORAR:
     return
 
 def main():
-    # --- Mini web server para Render (debe abrir SIEMPRE, aunque falte token) ---
+    # --- Mini web server para Render (debe abrir SIEMPRE) ---
     import threading
     from http.server import HTTPServer, BaseHTTPRequestHandler
     class KeepAliveHandler(BaseHTTPRequestHandler):
@@ -976,8 +976,6 @@ def main():
 
     if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
         print("Faltan TELEGRAM_TOKEN o GEMINI_API_KEY - revisa Environment en Render")
-        # No retornamos, dejamos el web server vivo para que Render no marque Failed
-        # Esperamos para que no crashee
         import time
         while True:
             time.sleep(3600)
