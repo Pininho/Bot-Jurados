@@ -954,15 +954,28 @@ EN QUE MEJORAR:
     return
 
 def main():
+    # --- Mini web server para Render (debe abrir SIEMPRE) ---
     import threading
-    import asyncio
     from http.server import HTTPServer, BaseHTTPRequestHandler
-    import json as json_lib
 
-    # Config webhook URL - Render URL fija
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-jurados.onrender.com")
-    PORT = int(os.getenv("PORT", 10000))
-    WEBHOOK_PATH = "/webhook"
+    class KeepAliveHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type","text/plain")
+            self.end_headers()
+            self.wfile.write(b"Bot Jurados Live - Polling Mode Fixed")
+        def log_message(self, *args):
+            return
+
+    def run_web():
+        port = int(os.getenv("PORT", 10000))
+        try:
+            HTTPServer(("0.0.0.0", port), KeepAliveHandler).serve_forever()
+        except Exception as e:
+            print(f"Web server error: {e}")
+
+    threading.Thread(target=run_web, daemon=True).start()
+    print(f"🌐 Mini web server en puerto {os.getenv('PORT', 10000)} para Render")
 
     if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
         print("Faltan TELEGRAM_TOKEN o GEMINI_API_KEY - revisa Environment en Render")
@@ -970,64 +983,13 @@ def main():
         while True:
             time.sleep(3600)
 
-    # Crear Application
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", start_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_media))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    async def _error_handler(update, context):
-        err = str(context.error).lower()
-        if "conflict" in err:
-            print(f"⚠️ Conflict ignorado en webhook mode: {context.error}")
-            return
-        print(f"Error no critico: {context.error}")
-
-    application.add_error_handler(_error_handler)
-
-    # Webhook handler que recibe POST de Telegram
-    class WebhookHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type","text/plain")
-            self.end_headers()
-            self.wfile.write(b"Bot Jurados Live - Webhook Mode")
-
-        def do_POST(self):
-            if self.path != WEBHOOK_PATH:
-                self.send_response(404)
-                self.end_headers()
-                return
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            try:
-                update_data = json_lib.loads(post_data.decode('utf-8'))
-                update = Update.de_json(update_data, application.bot)
-                # Procesar en el loop de asyncio
-                asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
-            except Exception as e:
-                print(f"Webhook error: {e}")
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self, *args):
-            return
-
-    # Loop de asyncio para el bot
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    async def setup_webhook():
-        await application.initialize()
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        await application.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}", drop_pending_updates=True)
-        print(f"✅ Webhook seteado: {WEBHOOK_URL}{WEBHOOK_PATH}")
-        await application.start()
-        # Conectar Telethon si existe
-        global user_client
+    async def post_init(app):
+        try:
+            # Borrar webhook para que polling funcione sin Conflict
+            await app.bot.delete_webhook(drop_pending_updates=True)
+            print("✅ Webhook borrado, polling limpio - modo polling definitivo")
+        except Exception as e:
+            print(f"Webhook delete: {e}")
         if user_client:
             try:
                 await user_client.connect()
@@ -1035,19 +997,37 @@ def main():
             except Exception as e:
                 print(f"Error Telethon: {e}")
 
-    loop.run_until_complete(setup_webhook())
+    async def error_handler(update, context):
+        err = str(context.error).lower()
+        if "conflict" in err:
+            print(f"⚠️ Conflict detectado (otro deploy viejo apagándose), esperando 15s...")
+            await asyncio.sleep(15)
+            return
+        print(f"Error no critico: {context.error}")
 
-    print(f"🌐 Webhook server en puerto {PORT} - Bot JURADO MAESTRO + BOSS listo")
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    app.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", start_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_media))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     print("Bot JURADO MAESTRO + BOSS, x2 creditos, identifica voces por timbre, 2-4+ participantes, sin robo/tongo...")
 
-    # HTTP server bloqueante
-    try:
-        HTTPServer(("0.0.0.0", PORT), WebhookHandler).serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        loop.run_until_complete(application.stop())
-        loop.run_until_complete(application.shutdown())
+    # Polling con drop_pending y reintento infinito - ahora que Auto-Deploy esta Off, no hay doble contenedor
+    import telegram.error
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES, close_loop=False, stop_signals=None)
+            break
+        except telegram.error.Conflict as cf:
+            print(f"⚠️ Conflicto detectado, esperando 15s y reintentando... {cf}")
+            time.sleep(15)
+            continue
+        except Exception as e:
+            print(f"Polling error, reintentando en 10s: {e}")
+            time.sleep(10)
+            continue
 
 if __name__ == "__main__":
     main()
