@@ -321,19 +321,7 @@ async def download_via_telethon(chat_id, message_id):
         import traceback; traceback.print_exc()
     return None
 
-async def post_init(app):
-    # FIX CONFLICT: borrar webhook viejo que causa "terminated by other getUpdates"
-    try:
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Webhook borrado, polling limpio")
-    except Exception as e:
-        print(f"Webhook delete: {e}")
-    if user_client:
-        try:
-            await user_client.connect()
-            print("✅ Telethon user client conectado")
-        except Exception as e:
-            print(f"Error conectando Telethon: {e}")
+# post_init reemplazado por _post_init_final dentro de main()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔥 Bot JURADO MAESTRO + BOSS activo. Manda audio/video y escribe JURADOS VOTEN. x2 creditos por batalla. Identifica voces por timbre, soporta 2-4+ participantes, sin robo. Usa /status para ver cuota y ultimo archivo.")
@@ -1146,14 +1134,52 @@ def main():
         while True:
             time.sleep(3600)
 
-    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    # ANTI-CONFLICT DEFINITIVO: 1 solo polling, borra webhook, reintenta si hay otro vivo
+    async def _post_init_final(app):
+        try:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+            print("✅ Webhook borrado, polling limpio")
+        except Exception as e:
+            print(f"Webhook delete: {e}")
+        # Telethon connect
+        if user_client:
+            try:
+                await user_client.connect()
+                print("✅ Telethon user client conectado")
+            except Exception as e:
+                print(f"Error conectando Telethon: {e}")
+
+    async def _error_handler(update, context):
+        err = str(context.error).lower()
+        if "conflict" in err:
+            print(f"⚠️ Conflict detectado, otro bot vivo, esperando 20s y reintentando... {context.error}")
+            # No crashear, dejar que updater reintente
+            return
+        print(f"Error no critico: {context.error}")
+
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init_final).build()
+    app.add_error_handler(_error_handler)
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", start_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     print("Bot JURADO MAESTRO + BOSS, x2 creditos, identifica voces por timbre, 2-4+ participantes, sin robo/tongo...")
-    app.run_polling()
+
+    # Loop anti-conflict: si otro getUpdates vivo, espera 15s y reintenta
+    import telegram.error
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES, close_loop=False, stop_signals=None)
+            break
+        except telegram.error.Conflict as cf:
+            print(f"⚠️ Conflicto detectado (otro bot vivo), esperando 15s... {cf}")
+            time.sleep(15)
+            continue
+        except Exception as e:
+            print(f"Polling error, reintentando en 10s: {e}")
+            time.sleep(10)
+            continue
 
 if __name__ == "__main__":
     main()
