@@ -322,6 +322,12 @@ async def download_via_telethon(chat_id, message_id):
     return None
 
 async def post_init(app):
+    # FIX CONFLICT: borrar webhook viejo que causa "terminated by other getUpdates"
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook borrado, polling limpio")
+    except Exception as e:
+        print(f"Webhook delete: {e}")
     if user_client:
         try:
             await user_client.connect()
