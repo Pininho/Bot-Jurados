@@ -98,53 +98,6 @@ def compress_to_420(input_path, output_path):
         print(f"No se pudo comprimir: {e}")
         return False
 
-def compress_to_360(input_path, output_path):
-    # Mas agresivo para videos muy largos/pesados
-    try:
-        cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", "scale=-2:360", "-c:v", "libx264", "-crf", "32", "-preset", "veryfast", "-c:a", "aac", "-b:a", "32k", output_path]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=240)
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
-    except Exception as e:
-        print(f"No se pudo comprimir 360: {e}")
-        return False
-
-def auto_compress_video(input_path):
-    # Comprime automatico: intenta 480p, si sigue >25MB intenta 360p. Retorna path comprimido o None
-    try:
-        orig_size = os.path.getsize(input_path) if os.path.exists(input_path) else 0
-        print(f"Auto-compresion: original {orig_size/1024/1024:.1f}MB {input_path}")
-        # Si ya es chico <15MB no comprimir aqui, se comprimira en JURADOS VOTEN igual
-        if orig_size < 15 * 1024 * 1024:
-            return None
-
-        base = input_path.rsplit('.', 1)[0]
-        out_480 = base + "_480p.mp4"
-        if compress_to_420(input_path, out_480):
-            size_480 = os.path.getsize(out_480)
-            print(f"480p comprimido: {size_480/1024/1024:.1f}MB")
-            if size_480 < 25 * 1024 * 1024:
-                return out_480
-            # Si aun pesa >25MB, intentar 360p
-            out_360 = base + "_360p.mp4"
-            if compress_to_360(out_480, out_360):
-                size_360 = os.path.getsize(out_360)
-                print(f"360p comprimido: {size_360/1024/1024:.1f}MB")
-                # borrar 480 intermedio
-                try:
-                    os.remove(out_480)
-                except:
-                    pass
-                return out_360
-            return out_480
-
-        # Fallback 360 directo del original
-        out_360b = base + "_360p_direct.mp4"
-        if compress_to_360(input_path, out_360b):
-            return out_360b
-    except Exception as e:
-        print(f"Error auto-compresion: {e}")
-    return None
-
 def convert_audio_to_mp3(input_path):
     """Convierte cualquier audio a mp3/wav compatible con Gemini - robusto"""
     try:
@@ -254,9 +207,8 @@ async def generate_with_retry(contents, max_retries=5):
                         return resp
                 except Exception as inner_e:
                     inner_msg = str(inner_e).lower()
-                    # Si modelo no existe o cuota agotada, probar siguiente modelo (lite tiene 500-1000/dia)
-                    if "404" in inner_msg or "not_found" in inner_msg or "no longer available" in inner_msg or "quota" in inner_msg or "resource_exhausted" in inner_msg or "429" in inner_msg or "exceeded" in inner_msg:
-                        print(f"Modelo {model_name} fallo/cuota agotada, probando siguiente... {inner_e}")
+                    if "404" in inner_msg or "not_found" in inner_msg or "no longer available" in inner_msg:
+                        print(f"Modelo {model_name} no disponible, probando siguiente... {inner_e}")
                         continue
                     else:
                         raise inner_e
@@ -293,35 +245,28 @@ async def download_via_telethon(chat_id, message_id):
     if not user_client:
         return None
     try:
-        if not user_client.is_connected():
-            await user_client.connect()
-        # Intentar por ID directo
-        try:
-            msg = await user_client.get_messages(chat_id, ids=message_id)
-        except:
-            msg = None
-        
-        # Si falla por ID (diferente numeracion Bot API vs MTProto), buscar ultimos 10 mensajes con media en ese chat
-        if not msg or not getattr(msg, 'media', None):
-            try:
-                msgs = await user_client.get_messages(chat_id, limit=10)
-                for m in msgs:
-                    if m.media:
-                        msg = m
-                        break
-            except Exception as e2:
-                print(f"Telethon busqueda ultimos mensajes fallo: {e2}")
-
+        await user_client.connect()
+        msg = await user_client.get_messages(chat_id, ids=message_id)
         if msg and msg.media:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
                 path = await user_client.download_media(msg, tf.name)
                 return path
     except Exception as e:
         print(f"Telethon download error: {e}")
-        import traceback; traceback.print_exc()
+    finally:
+        try:
+            await user_client.disconnect()
+        except:
+            pass
     return None
 
-# post_init reemplazado por _post_init_final dentro de main()
+async def post_init(app):
+    if user_client:
+        try:
+            await user_client.connect()
+            print("✅ Telethon user client conectado")
+        except Exception as e:
+            print(f"Error conectando Telethon: {e}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔥 Bot JURADO MAESTRO + BOSS activo. Manda audio/video y escribe JURADOS VOTEN. x2 creditos por batalla. Identifica voces por timbre, soporta 2-4+ participantes, sin robo. Usa /status para ver cuota y ultimo archivo.")
@@ -360,74 +305,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
             temp_path = tf.name
-
-        file_size = getattr(file_obj, 'file_size', 0) or 0
-        is_too_big = file_size > 19 * 1024 * 1024  # Telegram Bot API limite ~20MB
-
-        downloaded = False
-        # Si es muy grande, intentar primero con Telethon (si tienes SESSION_STRING configurado)
-        if is_too_big and user_client:
-            try:
-                await update.message.reply_text(f"📦 Video pesa {file_size/1024/1024:.1f}MB (>20MB), bajando con Telethon para archivos grandes...")
-                tele_path = await download_via_telethon(chat_id, message.message_id)
-                if tele_path and os.path.exists(tele_path):
-                    # mover a temp_path esperado
-                    import shutil
-                    shutil.move(tele_path, temp_path)
-                    downloaded = True
-                    print(f"✅ Bajado via Telethon grande: {temp_path} {os.path.getsize(temp_path)} bytes")
-            except Exception as tele_e:
-                print(f"Telethon grande fallo: {tele_e}")
-                # seguir a intentar bot api que dara error controlado abajo
-
-        if not downloaded:
-            try:
-                new_file = await context.bot.get_file(file_obj.file_id)
-                await new_file.download_to_drive(temp_path)
-                downloaded = True
-            except Exception as getfile_e:
-                # Si falla por File is too big, intentar Telethon como respaldo
-                if "too big" in str(getfile_e).lower() or "file is too big" in str(getfile_e).lower():
-                    if user_client:
-                        try:
-                            await update.message.reply_text(f"📦 Telegram dice 'File is too big' ({file_size/1024/1024:.1f}MB). Intentando con Telethon...")
-                            tele_path = await download_via_telethon(chat_id, message.message_id)
-                            if tele_path and os.path.exists(tele_path):
-                                import shutil
-                                shutil.move(tele_path, temp_path)
-                                downloaded = True
-                                print(f"✅ Bajado via Telethon fallback: {temp_path}")
-                            else:
-                                raise getfile_e
-                        except Exception as tele2_e:
-                            print(f"Telethon fallback fallo: {tele2_e}")
-                            raise getfile_e
-                    else:
-                        raise getfile_e
-                else:
-                    raise getfile_e
-
-        if not downloaded or not os.path.exists(temp_path):
-            raise Exception("No se pudo descargar el archivo")
-
-        # AUTO-COMPRESION inmediata para videos largos - para que Gemini lo pueda leer sin que tu hagas nada
-        try:
-            orig_size = os.path.getsize(temp_path)
-            if orig_size > 15 * 1024 * 1024:  # >15MB
-                await update.message.reply_text(f"🔧 Video pesa {orig_size/1024/1024:.1f}MB, lo estoy comprimiendo automático a 480p/360p para que la IA lo pueda leer...")
-                compressed_auto = auto_compress_video(temp_path)
-                if compressed_auto and os.path.exists(compressed_auto):
-                    new_size = os.path.getsize(compressed_auto)
-                    await update.message.reply_text(f"✅ Comprimido automático: {orig_size/1024/1024:.1f}MB → {new_size/1024/1024:.1f}MB")
-                    # borrar original grande y usar comprimido
-                    try:
-                        os.remove(temp_path)
-                    except:
-                        pass
-                    temp_path = compressed_auto
-        except Exception as auto_e:
-            print(f"Auto compresion fallo: {auto_e}")
-
+        new_file = await context.bot.get_file(file_obj.file_id)
+        await new_file.download_to_drive(temp_path)
         last_media[chat_id] = temp_path
         # Limpiar identificación anterior para no arrastrar nombres de batallas pasadas - cada archivo es batalla nueva
         if chat_id in last_media_names:
@@ -465,20 +344,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ Error guardando media {chat_id}: {e}")
         import traceback; traceback.print_exc()
-        err_low = str(e).lower()
-        if "too big" in err_low or "file is too big" in err_low:
-            size_mb = (file_size / 1024 / 1024) if 'file_size' in locals() and file_size else 0
-            await update.message.reply_text(
-                f"❌ Video pesa {size_mb:.1f}MB, Telegram no deja bajar archivos >20MB con bots.\n\n"
-                "Soluciones rápidas (elige 1):\n"
-                "1️⃣ Mándalo como VIDEO (no como archivo/documento) y Telegram lo comprime solo\n"
-                "2️⃣ Córtalo en 2 partes <20MB cada una\n"
-                "3️⃣ Comprímelo a 480p antes de enviar\n"
-                "4️⃣ Si quieres que baje hasta 2GB, activa Telethon: pon API_ID, API_HASH y SESSION_STRING en Render > Environment\n\n"
-                "Por ahora, mándalo como VIDEO normal, no como documento."
-            )
-        else:
-            await update.message.reply_text(f"❌ Error guardando: {e}")
+        await update.message.reply_text(f"❌ Error guardando: {e}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -546,29 +412,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Duracion audio: {duration}s, archivo: {temp_path}, size: {os.path.getsize(temp_path) if os.path.exists(temp_path) else 0}")
 
         if temp_path.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")) or "video" in temp_path.lower():
-            # Compresion automatica inteligente para videos largos
-            size_before = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
-            if size_before > 8 * 1024 * 1024:  # >8MB ya comprimir
-                await update.message.reply_text(f"🔧 Preparando video {size_before/1024/1024:.1f}MB para IA (comprimiendo a 480p)...")
             compressed_path = temp_path + "_480p.mp4"
             if compress_to_420(temp_path, compressed_path):
                 final_path = compressed_path
-                size_after = os.path.getsize(final_path)
-                # Si sigue muy pesado >25MB, recomprimir a 360p
-                if size_after > 25 * 1024 * 1024:
-                    await update.message.reply_text(f"📦 Aun pesa {size_after/1024/1024:.1f}MB, recomprimiendo a 360p para que entre...")
-                    compressed_360 = temp_path + "_360p.mp4"
-                    if compress_to_360(final_path, compressed_360):
-                        try:
-                            os.remove(final_path)
-                        except:
-                            pass
-                        final_path = compressed_360
-            # Si no se pudo comprimir pero es muy grande, intentar auto_compress
-            else:
-                auto_path = auto_compress_video(temp_path)
-                if auto_path:
-                    final_path = auto_path
         else:
             # SIEMPRE convertir audio a mp3 compatible (WhatsApp m4a a veces tiene codec opus raro que Gemini rechaza)
             # Esto arregla el error FAILED de AUD-20260911-WA0039.m4a
@@ -1108,25 +954,15 @@ EN QUE MEJORAR:
     return
 
 def main():
-    # --- Mini web server para Render (debe abrir SIEMPRE) ---
     import threading
+    import asyncio
     from http.server import HTTPServer, BaseHTTPRequestHandler
-    class KeepAliveHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type","text/plain")
-            self.end_headers()
-            self.wfile.write(b"Bot Jurados Live")
-        def log_message(self, *args):
-            return
-    def run_web():
-        port = int(os.getenv("PORT", 10000))
-        try:
-            HTTPServer(("0.0.0.0", port), KeepAliveHandler).serve_forever()
-        except Exception as e:
-            print(f"Web server error: {e}")
-    threading.Thread(target=run_web, daemon=True).start()
-    print(f"🌐 Mini web server en puerto {os.getenv('PORT', 10000)} para Render")
+    import json as json_lib
+
+    # Config webhook URL - Render URL fija
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-jurados.onrender.com")
+    PORT = int(os.getenv("PORT", 10000))
+    WEBHOOK_PATH = "/webhook"
 
     if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
         print("Faltan TELEGRAM_TOKEN o GEMINI_API_KEY - revisa Environment en Render")
@@ -1134,52 +970,84 @@ def main():
         while True:
             time.sleep(3600)
 
-    # ANTI-CONFLICT DEFINITIVO: 1 solo polling, borra webhook, reintenta si hay otro vivo
-    async def _post_init_final(app):
-        try:
-            await app.bot.delete_webhook(drop_pending_updates=True)
-            print("✅ Webhook borrado, polling limpio")
-        except Exception as e:
-            print(f"Webhook delete: {e}")
-        # Telethon connect
+    # Crear Application
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", start_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_media))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    async def _error_handler(update, context):
+        err = str(context.error).lower()
+        if "conflict" in err:
+            print(f"⚠️ Conflict ignorado en webhook mode: {context.error}")
+            return
+        print(f"Error no critico: {context.error}")
+
+    application.add_error_handler(_error_handler)
+
+    # Webhook handler que recibe POST de Telegram
+    class WebhookHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type","text/plain")
+            self.end_headers()
+            self.wfile.write(b"Bot Jurados Live - Webhook Mode")
+
+        def do_POST(self):
+            if self.path != WEBHOOK_PATH:
+                self.send_response(404)
+                self.end_headers()
+                return
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            try:
+                update_data = json_lib.loads(post_data.decode('utf-8'))
+                update = Update.de_json(update_data, application.bot)
+                # Procesar en el loop de asyncio
+                asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
+            except Exception as e:
+                print(f"Webhook error: {e}")
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *args):
+            return
+
+    # Loop de asyncio para el bot
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def setup_webhook():
+        await application.initialize()
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        await application.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}", drop_pending_updates=True)
+        print(f"✅ Webhook seteado: {WEBHOOK_URL}{WEBHOOK_PATH}")
+        await application.start()
+        # Conectar Telethon si existe
+        global user_client
         if user_client:
             try:
                 await user_client.connect()
                 print("✅ Telethon user client conectado")
             except Exception as e:
-                print(f"Error conectando Telethon: {e}")
+                print(f"Error Telethon: {e}")
 
-    async def _error_handler(update, context):
-        err = str(context.error).lower()
-        if "conflict" in err:
-            print(f"⚠️ Conflict detectado, otro bot vivo, esperando 20s y reintentando... {context.error}")
-            # No crashear, dejar que updater reintente
-            return
-        print(f"Error no critico: {context.error}")
+    loop.run_until_complete(setup_webhook())
 
-    app = Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init_final).build()
-    app.add_error_handler(_error_handler)
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", start_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_media))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    print(f"🌐 Webhook server en puerto {PORT} - Bot JURADO MAESTRO + BOSS listo")
     print("Bot JURADO MAESTRO + BOSS, x2 creditos, identifica voces por timbre, 2-4+ participantes, sin robo/tongo...")
 
-    # Loop anti-conflict: si otro getUpdates vivo, espera 15s y reintenta
-    import telegram.error
-    while True:
-        try:
-            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES, close_loop=False, stop_signals=None)
-            break
-        except telegram.error.Conflict as cf:
-            print(f"⚠️ Conflicto detectado (otro bot vivo), esperando 15s... {cf}")
-            time.sleep(15)
-            continue
-        except Exception as e:
-            print(f"Polling error, reintentando en 10s: {e}")
-            time.sleep(10)
-            continue
+    # HTTP server bloqueante
+    try:
+        HTTPServer(("0.0.0.0", PORT), WebhookHandler).serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.run_until_complete(application.stop())
+        loop.run_until_complete(application.shutdown())
 
 if __name__ == "__main__":
     main()
