@@ -245,19 +245,29 @@ async def download_via_telethon(chat_id, message_id):
     if not user_client:
         return None
     try:
-        await user_client.connect()
-        msg = await user_client.get_messages(chat_id, ids=message_id)
+        if not user_client.is_connected():
+            await user_client.connect()
+        # get_messages puede fallar si chat_id es con -100, probar con entity
+        try:
+            msg = await user_client.get_messages(chat_id, ids=message_id)
+        except Exception as gm_e:
+            print(f"Telethon get_messages error, intentando con entity: {gm_e}")
+            try:
+                entity = await user_client.get_entity(chat_id)
+                msg = await user_client.get_messages(entity, ids=message_id)
+            except Exception as gm2_e:
+                print(f"Telethon get_messages con entity fallo: {gm2_e}")
+                return None
         if msg and msg.media:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
                 path = await user_client.download_media(msg, tf.name)
+                print(f"Telethon downloaded to {path}")
                 return path
+        else:
+            print(f"Telethon: no media in msg {message_id}")
     except Exception as e:
         print(f"Telethon download error: {e}")
-    finally:
-        try:
-            await user_client.disconnect()
-        except:
-            pass
+        import traceback; traceback.print_exc()
     return None
 
 async def post_init(app):
@@ -288,7 +298,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     message = update.message
-    print(f"📥 MEDIA RECIBIDO de {chat_id} - audio:{bool(message.audio)} voice:{bool(message.voice)} video:{bool(message.video)} doc:{bool(message.document)} doc_mime:{message.document.mime_type if message.document else 'N/A'}")
+    print(f"📥 MEDIA RECIBIDO de {chat_id} - audio:{bool(message.audio)} voice:{bool(message.voice)} video:{bool(message.video)} doc:{bool(message.document)} doc_mime:{message.document.mime_type if message.document else 'N/A'} size:{getattr(message.video, 'file_size', 0) or getattr(message.document, 'file_size', 0) or getattr(message.audio, 'file_size', 0) or 0}")
     file_obj = None
     if message.audio:
         file_obj = message.audio
@@ -305,8 +315,32 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
             temp_path = tf.name
-        new_file = await context.bot.get_file(file_obj.file_id)
-        await new_file.download_to_drive(temp_path)
+        
+        # Intentar descarga normal, si es muy grande usar Telethon o avisar
+        try:
+            new_file = await context.bot.get_file(file_obj.file_id)
+            await new_file.download_to_drive(temp_path)
+        except Exception as dl_e:
+            err_str = str(dl_e).lower()
+            print(f"⚠️ get_file fallo: {dl_e} - err_str {err_str}")
+            if "too big" in err_str or "too large" in err_str or "file is too big" in err_str:
+                # Archivo >20MB - intentar Telethon si existe
+                if user_client and API_ID and API_HASH and SESSION_STRING:
+                    await update.message.reply_text("📦 Video muy pesado (>20MB), descargando por vía premium (Telethon) 10-20 seg...")
+                    tele_path = await download_via_telethon(chat_id, message.message_id)
+                    if tele_path and os.path.exists(tele_path):
+                        # mover a temp_path
+                        import shutil
+                        shutil.move(tele_path, temp_path)
+                        print(f"✅ Descargado por Telethon: {temp_path} size {os.path.getsize(temp_path)}")
+                    else:
+                        raise Exception("Telethon no pudo descargar, asegúrate que SESSION_STRING, API_ID, API_HASH estén en Render Environment. Mientras, comprime el video a 480p o córtalo a <1 min")
+                else:
+                    await update.message.reply_text("❌ Video muy pesado (>20MB). Telegram Bot no deja bajar >20MB sin cuenta premium.\n\nSoluciones:\n1. Corta el video a <1 minuto o <20MB\n2. Comprime a 480p antes de mandarlo\n3. O agrega en Render: API_ID, API_HASH y SESSION_STRING (de @BotFather + my.telegram.org) para que use Telethon y baje hasta 2GB")
+                    raise Exception(f"File is too big - necesita Telethon o compresión")
+            else:
+                raise dl_e
+        
         last_media[chat_id] = temp_path
         # Limpiar identificación anterior para no arrastrar nombres de batallas pasadas - cada archivo es batalla nueva
         if chat_id in last_media_names:
