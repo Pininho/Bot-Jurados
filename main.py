@@ -98,6 +98,53 @@ def compress_to_420(input_path, output_path):
         print(f"No se pudo comprimir: {e}")
         return False
 
+def compress_to_360(input_path, output_path):
+    # Mas agresivo para videos muy largos/pesados
+    try:
+        cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", "scale=-2:360", "-c:v", "libx264", "-crf", "32", "-preset", "veryfast", "-c:a", "aac", "-b:a", "32k", output_path]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=240)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+    except Exception as e:
+        print(f"No se pudo comprimir 360: {e}")
+        return False
+
+def auto_compress_video(input_path):
+    # Comprime automatico: intenta 480p, si sigue >25MB intenta 360p. Retorna path comprimido o None
+    try:
+        orig_size = os.path.getsize(input_path) if os.path.exists(input_path) else 0
+        print(f"Auto-compresion: original {orig_size/1024/1024:.1f}MB {input_path}")
+        # Si ya es chico <15MB no comprimir aqui, se comprimira en JURADOS VOTEN igual
+        if orig_size < 15 * 1024 * 1024:
+            return None
+
+        base = input_path.rsplit('.', 1)[0]
+        out_480 = base + "_480p.mp4"
+        if compress_to_420(input_path, out_480):
+            size_480 = os.path.getsize(out_480)
+            print(f"480p comprimido: {size_480/1024/1024:.1f}MB")
+            if size_480 < 25 * 1024 * 1024:
+                return out_480
+            # Si aun pesa >25MB, intentar 360p
+            out_360 = base + "_360p.mp4"
+            if compress_to_360(out_480, out_360):
+                size_360 = os.path.getsize(out_360)
+                print(f"360p comprimido: {size_360/1024/1024:.1f}MB")
+                # borrar 480 intermedio
+                try:
+                    os.remove(out_480)
+                except:
+                    pass
+                return out_360
+            return out_480
+
+        # Fallback 360 directo del original
+        out_360b = base + "_360p_direct.mp4"
+        if compress_to_360(input_path, out_360b):
+            return out_360b
+    except Exception as e:
+        print(f"Error auto-compresion: {e}")
+    return None
+
 def convert_audio_to_mp3(input_path):
     """Convierte cualquier audio a mp3/wav compatible con Gemini - robusto"""
     try:
@@ -245,19 +292,32 @@ async def download_via_telethon(chat_id, message_id):
     if not user_client:
         return None
     try:
-        await user_client.connect()
-        msg = await user_client.get_messages(chat_id, ids=message_id)
+        if not user_client.is_connected():
+            await user_client.connect()
+        # Intentar por ID directo
+        try:
+            msg = await user_client.get_messages(chat_id, ids=message_id)
+        except:
+            msg = None
+        
+        # Si falla por ID (diferente numeracion Bot API vs MTProto), buscar ultimos 10 mensajes con media en ese chat
+        if not msg or not getattr(msg, 'media', None):
+            try:
+                msgs = await user_client.get_messages(chat_id, limit=10)
+                for m in msgs:
+                    if m.media:
+                        msg = m
+                        break
+            except Exception as e2:
+                print(f"Telethon busqueda ultimos mensajes fallo: {e2}")
+
         if msg and msg.media:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
                 path = await user_client.download_media(msg, tf.name)
                 return path
     except Exception as e:
         print(f"Telethon download error: {e}")
-    finally:
-        try:
-            await user_client.disconnect()
-        except:
-            pass
+        import traceback; traceback.print_exc()
     return None
 
 async def post_init(app):
@@ -354,6 +414,24 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not downloaded or not os.path.exists(temp_path):
             raise Exception("No se pudo descargar el archivo")
+
+        # AUTO-COMPRESION inmediata para videos largos - para que Gemini lo pueda leer sin que tu hagas nada
+        try:
+            orig_size = os.path.getsize(temp_path)
+            if orig_size > 15 * 1024 * 1024:  # >15MB
+                await update.message.reply_text(f"🔧 Video pesa {orig_size/1024/1024:.1f}MB, lo estoy comprimiendo automático a 480p/360p para que la IA lo pueda leer...")
+                compressed_auto = auto_compress_video(temp_path)
+                if compressed_auto and os.path.exists(compressed_auto):
+                    new_size = os.path.getsize(compressed_auto)
+                    await update.message.reply_text(f"✅ Comprimido automático: {orig_size/1024/1024:.1f}MB → {new_size/1024/1024:.1f}MB")
+                    # borrar original grande y usar comprimido
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                    temp_path = compressed_auto
+        except Exception as auto_e:
+            print(f"Auto compresion fallo: {auto_e}")
 
         last_media[chat_id] = temp_path
         # Limpiar identificación anterior para no arrastrar nombres de batallas pasadas - cada archivo es batalla nueva
@@ -473,9 +551,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Duracion audio: {duration}s, archivo: {temp_path}, size: {os.path.getsize(temp_path) if os.path.exists(temp_path) else 0}")
 
         if temp_path.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")) or "video" in temp_path.lower():
+            # Compresion automatica inteligente para videos largos
+            size_before = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+            if size_before > 8 * 1024 * 1024:  # >8MB ya comprimir
+                await update.message.reply_text(f"🔧 Preparando video {size_before/1024/1024:.1f}MB para IA (comprimiendo a 480p)...")
             compressed_path = temp_path + "_480p.mp4"
             if compress_to_420(temp_path, compressed_path):
                 final_path = compressed_path
+                size_after = os.path.getsize(final_path)
+                # Si sigue muy pesado >25MB, recomprimir a 360p
+                if size_after > 25 * 1024 * 1024:
+                    await update.message.reply_text(f"📦 Aun pesa {size_after/1024/1024:.1f}MB, recomprimiendo a 360p para que entre...")
+                    compressed_360 = temp_path + "_360p.mp4"
+                    if compress_to_360(final_path, compressed_360):
+                        try:
+                            os.remove(final_path)
+                        except:
+                            pass
+                        final_path = compressed_360
+            # Si no se pudo comprimir pero es muy grande, intentar auto_compress
+            else:
+                auto_path = auto_compress_video(temp_path)
+                if auto_path:
+                    final_path = auto_path
         else:
             # SIEMPRE convertir audio a mp3 compatible (WhatsApp m4a a veces tiene codec opus raro que Gemini rechaza)
             # Esto arregla el error FAILED de AUD-20260911-WA0039.m4a
