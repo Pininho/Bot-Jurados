@@ -254,8 +254,9 @@ async def generate_with_retry(contents, max_retries=5):
                         return resp
                 except Exception as inner_e:
                     inner_msg = str(inner_e).lower()
-                    if "404" in inner_msg or "not_found" in inner_msg or "no longer available" in inner_msg:
-                        print(f"Modelo {model_name} no disponible, probando siguiente... {inner_e}")
+                    # Si modelo no existe o cuota agotada, probar siguiente modelo (lite tiene 500-1000/dia)
+                    if "404" in inner_msg or "not_found" in inner_msg or "no longer available" in inner_msg or "quota" in inner_msg or "resource_exhausted" in inner_msg or "429" in inner_msg or "exceeded" in inner_msg:
+                        print(f"Modelo {model_name} fallo/cuota agotada, probando siguiente... {inner_e}")
                         continue
                     else:
                         raise inner_e
