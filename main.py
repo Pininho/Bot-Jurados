@@ -243,97 +243,21 @@ async def generate_with_retry(contents, max_retries=5):
 
 async def download_via_telethon(chat_id, message_id):
     if not user_client:
-        print("Telethon: user_client no existe")
         return None
     try:
-        if not user_client.is_connected():
-            await user_client.connect()
-        
-        # El chat_id que llega es del usuario (ej 123456), pero para el user_client (Cristopher)
-        # el dialogo con el bot se busca por el ID del BOT, no por el ID del usuario.
-        # El ID del bot sale del TELEGRAM_TOKEN (parte antes de :)
-        bot_id = None
-        try:
-            if TELEGRAM_TOKEN and ":" in TELEGRAM_TOKEN:
-                bot_id = int(TELEGRAM_TOKEN.split(":")[0])
-        except:
-            pass
-
-        # Intentar 1: buscar mensaje exacto en el chat con el bot
-        if bot_id:
-            try:
-                print(f"Telethon: buscando msg {message_id} en chat con bot_id {bot_id}")
-                msg = await user_client.get_messages(bot_id, ids=message_id)
-                if msg and getattr(msg, 'media', None):
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                        path = await user_client.download_media(msg, tf.name)
-                        print(f"Telethon downloaded (via bot_id) to {path}")
-                        return path
-                else:
-                    print(f"Telethon: no media en msg {message_id} via bot_id, msg={msg}")
-            except Exception as e1:
-                print(f"Telethon get via bot_id fallo: {e1}")
-
-        # Intentar 2: buscar en los ultimos mensajes con el bot - SOLO si es muy reciente (<3 min)
-        if bot_id:
-            try:
-                from datetime import datetime, timezone, timedelta
-                now = datetime.now(timezone.utc)
-                msgs = await user_client.get_messages(bot_id, limit=20)
-                for m in msgs:
-                    if getattr(m, 'media', None):
-                        # Solo agarra si es de los ultimos 3 minutos, no uno viejo de hace 10 min
-                        age = (now - m.date).total_seconds() if m.date else 9999
-                        if age < 180:  # 3 minutos
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                                path = await user_client.download_media(m, tf.name)
-                                print(f"Telethon downloaded (fallback reciente bot) to {path}, msg_id {m.id}, age {age}s")
-                                return path
-                        else:
-                            print(f"Telethon: msg {m.id} es viejo ({age}s), saltando")
-                            break  # los siguientes son mas viejos aun
-            except Exception as e2:
-                print(f"Telethon fallback bot_id fallo: {e2}")
-
-        # Intentar 3: buscar por chat_id original (GRUPO - tu caso) - ESTE ES EL EXACTO, NO ES VIEJO
-        try:
-            print(f"Telethon: buscando msg EXACTO {message_id} en grupo {chat_id}")
-            msg = await user_client.get_messages(chat_id, ids=message_id)
-            if msg and getattr(msg, 'media', None):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                    path = await user_client.download_media(msg, tf.name)
-                    print(f"Telethon downloaded (via chat_id grupo EXACTO) to {path}")
-                    return path
-            else:
-                print(f"Telethon: no media en msg {message_id} via chat_id grupo")
-        except Exception as gm_e:
-            print(f"Telethon get_messages chat_id grupo error: {gm_e}")
-
-        # Intentar 4: fallback GRUPO - solo ultimos 3 minutos, no 10 min atras
-        try:
-            print(f"Telethon: fallback buscando ULTIMO reciente en grupo {chat_id}")
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc)
-            entity = await user_client.get_entity(chat_id)
-            msgs = await user_client.get_messages(entity, limit=20)
-            for m in msgs:
-                if getattr(m, 'media', None):
-                    age = (now - m.date).total_seconds() if m.date else 9999
-                    if age < 180:  # solo si es de los ultimos 3 minutos = el que acabas de mandar
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                            path = await user_client.download_media(m, tf.name)
-                            print(f"Telethon downloaded (fallback grupo reciente) to {path}, msg_id {m.id}, age {age}s")
-                            return path
-                    else:
-                        print(f"Telethon: grupo msg {m.id} viejo {age}s, no lo agarro (evita agarrar de hace 10 min)")
-                        break
-        except Exception as gm2_e:
-            print(f"Telethon fallback grupo fallo: {gm2_e}")
-
-        print(f"Telethon: no media encontrado para msg {message_id} en ningun chat")
+        await user_client.connect()
+        msg = await user_client.get_messages(chat_id, ids=message_id)
+        if msg and msg.media:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                path = await user_client.download_media(msg, tf.name)
+                return path
     except Exception as e:
         print(f"Telethon download error: {e}")
-        import traceback; traceback.print_exc()
+    finally:
+        try:
+            await user_client.disconnect()
+        except:
+            pass
     return None
 
 async def post_init(app):
@@ -1085,9 +1009,9 @@ def main():
 
     async def post_init(app):
         try:
-            # Borrar webhook para que polling funcione sin Conflict
-            await app.bot.delete_webhook(drop_pending_updates=True)
-            print("✅ Webhook borrado, polling limpio - modo polling definitivo")
+            # Borrar webhook sin borrar mensajes pendientes - asi si Render se durmio, no borra el video que mandaste
+            await app.bot.delete_webhook(drop_pending_updates=False)
+            print("✅ Webhook borrado, polling con mensajes pendientes guardados")
         except Exception as e:
             print(f"Webhook delete: {e}")
         if user_client:
@@ -1114,11 +1038,11 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     print("Bot JURADO MAESTRO + BOSS, x2 creditos, identifica voces por timbre, 2-4+ participantes, sin robo/tongo...")
 
-    # Polling con drop_pending y reintento infinito - ahora que Auto-Deploy esta Off, no hay doble contenedor
+    # Polling que NO borra mensajes si Render se durmio - los guarda y los procesa al despertar (50 seg delay pero responde)
     import telegram.error
     while True:
         try:
-            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES, close_loop=False, stop_signals=None)
+            app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES, close_loop=False, stop_signals=None)
             break
         except telegram.error.Conflict as cf:
             print(f"⚠️ Conflicto detectado, esperando 15s y reintentando... {cf}")
