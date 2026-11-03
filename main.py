@@ -1,4 +1,8 @@
 import os
+import sys
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+print(">>> INICIANDO main.py - imports...", flush=True)
 import re
 import asyncio
 import tempfile
@@ -21,20 +25,34 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 
 client = None
 if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    print(f"✅ Gemini client creado correctamente")
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1"})
+        print(f"✅ Gemini client creado correctamente (v1 API)")
+    except Exception as e_v1:
+        print(f"Fallback a v1beta por error v1: {e_v1}")
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        print(f"✅ Gemini client creado correctamente (v1beta fallback)")
 
 user_client = None
 if API_ID and API_HASH:
     try:
-        api_id_int = int(API_ID)
-        if SESSION_STRING:
-            user_client = TelegramClient(StringSession(SESSION_STRING), api_id_int, API_HASH)
+        api_id_int = int(str(API_ID).strip())
+        session_clean = str(SESSION_STRING).strip() if SESSION_STRING else ""
+        # Remove possible newlines/spaces that Render sometimes adds
+        session_clean = session_clean.replace("\n", "").replace("\r", "").replace(" ", "")
+        if session_clean:
+            print(f"🔑 SESSION_STRING detectado, largo {len(session_clean)} - intentando crear client...")
+            user_client = TelegramClient(StringSession(session_clean), api_id_int, API_HASH.strip())
+            print(f"✅ Telethon client creado, session largo {len(session_clean)}")
         else:
-            user_client = TelegramClient('user_session', api_id_int, API_HASH)
+            print("⚠️ SESSION_STRING vacío - Telethon no podrá bajar >20MB")
+            user_client = TelegramClient('user_session', api_id_int, API_HASH.strip())
     except Exception as e:
-        print(f"Error Telethon: {e}")
+        print(f"❌ Error creando Telethon client: {e}")
+        import traceback; traceback.print_exc()
         user_client = None
+else:
+    print("⚠️ API_ID o API_HASH no configurados - Telethon deshabilitado")
 
 last_media = {}
 last_uploaded_files = {}
@@ -143,7 +161,7 @@ def get_audio_duration(input_path):
     return 0
 
 
-MODELS_TO_TRY = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]  # FINAL: FULL primero porque es esencial que le atine a quien es quien. Lite solo de respaldo cuando se acaba cuota gratis. No cambiar a lite primero.
+MODELS_TO_TRY = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-flash-latest"]  # REAL: modelos que existen y no estan baneados. 2.0-flash es el mas estable, lite tiene mas cuota y menos 503
 
 def extract_text_safe(resp):
     try:
@@ -210,6 +228,9 @@ async def generate_with_retry(contents, max_retries=5):
                     if "404" in inner_msg or "not_found" in inner_msg or "no longer available" in inner_msg:
                         print(f"Modelo {model_name} no disponible, probando siguiente... {inner_e}")
                         continue
+                    if "429" in inner_msg or "quota" in inner_msg or "resource_exhausted" in inner_msg:
+                        print(f"Modelo {model_name} cuota agotada (20/dia free tier), probando siguiente con mas cuota... {inner_e}")
+                        continue
                     else:
                         raise inner_e
             raise Exception("Ningún modelo disponible")
@@ -243,30 +264,111 @@ async def generate_with_retry(contents, max_retries=5):
 
 async def download_via_telethon(chat_id, message_id):
     if not user_client:
+        print("❌ Telethon: user_client no existe - falta SESSION_STRING, API_ID o API_HASH en Render")
         return None
     try:
-        await user_client.connect()
-        msg = await user_client.get_messages(chat_id, ids=message_id)
-        if msg and msg.media:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                path = await user_client.download_media(msg, tf.name)
-                return path
-    except Exception as e:
-        print(f"Telethon download error: {e}")
-    finally:
+        if not user_client.is_connected():
+            await user_client.connect()
+            print("✅ Telethon conectado para descarga")
+        
+        # ID del bot
+        bot_id = None
         try:
-            await user_client.disconnect()
+            if TELEGRAM_TOKEN and ":" in TELEGRAM_TOKEN:
+                bot_id = int(TELEGRAM_TOKEN.split(":")[0])
         except:
             pass
+
+        # 1. Buscar mensaje exacto en chat con el bot (privado)
+        if bot_id:
+            try:
+                print(f"🔍 Telethon: buscando msg {message_id} en bot_id {bot_id}")
+                msg = await user_client.get_messages(bot_id, ids=message_id)
+                if msg and getattr(msg, 'media', None):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                        path = await user_client.download_media(msg, tf.name)
+                        print(f"✅ Telethon downloaded (bot_id exacto) to {path} size {os.path.getsize(path)}")
+                        return path
+                else:
+                    print(f"⚠️ Telethon: no media en msg {message_id} via bot_id")
+            except Exception as e1:
+                print(f"❌ Telethon bot_id exacto fallo: {e1}")
+
+        # 2. Buscar por chat_id exacto (GRUPO - tu caso real)
+        try:
+            print(f"🔍 Telethon: buscando msg EXACTO {message_id} en grupo {chat_id}")
+            msg = await user_client.get_messages(chat_id, ids=message_id)
+            if msg and getattr(msg, 'media', None):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                    path = await user_client.download_media(msg, tf.name)
+                    print(f"✅ Telethon downloaded (grupo exacto) to {path} size {os.path.getsize(path)}")
+                    return path
+            else:
+                print(f"⚠️ Telethon: no media en msg {message_id} via chat_id grupo")
+        except Exception as e:
+            print(f"❌ Telethon grupo exacto fallo: {e}")
+            import traceback; traceback.print_exc()
+
+        # 3. Fallback: ultimos mensajes del grupo, solo si son recientes (<3 min)
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            print(f"🔍 Telethon: fallback buscando ultimos 20 en grupo {chat_id}")
+            entity = await user_client.get_entity(chat_id)
+            msgs = await user_client.get_messages(entity, limit=20)
+            for m in msgs:
+                if getattr(m, 'media', None):
+                    age = (now - m.date).total_seconds() if m.date else 9999
+                    print(f"  -> msg {m.id} age {age:.0f}s media={bool(m.media)}")
+                    if age < 180:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                            path = await user_client.download_media(m, tf.name)
+                            print(f"✅ Telethon downloaded (fallback grupo reciente {age:.0f}s) to {path}")
+                            return path
+                    else:
+                        print(f"⏩ Telethon: msg {m.id} viejo {age:.0f}s, saltando")
+                        break
+        except Exception as e:
+            print(f"❌ Telethon fallback grupo fallo: {e}")
+            import traceback; traceback.print_exc()
+
+        # 4. Fallback bot: ultimos del bot, recientes
+        if bot_id:
+            try:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                print(f"🔍 Telethon: fallback buscando ultimos 20 en bot {bot_id}")
+                msgs = await user_client.get_messages(bot_id, limit=20)
+                for m in msgs:
+                    if getattr(m, 'media', None):
+                        age = (now - m.date).total_seconds() if m.date else 9999
+                        if age < 180:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                                path = await user_client.download_media(m, tf.name)
+                                print(f"✅ Telethon downloaded (fallback bot reciente) to {path}")
+                                return path
+            except Exception as e:
+                print(f"❌ Telethon fallback bot fallo: {e}")
+
+        print(f"❌ Telethon: no media encontrado para {message_id} en ningun chat")
+    except Exception as e:
+        print(f"❌ Telethon download error general: {e}")
+        import traceback; traceback.print_exc()
     return None
 
 async def post_init(app):
     if user_client:
         try:
             await user_client.connect()
-            print("✅ Telethon user client conectado")
+            print("✅ Telethon user client conectado en post_init")
+            # Verificar que la session es válida
+            me = await user_client.get_me()
+            print(f"✅ Telethon logueado como: {me.first_name} (@{me.username}) ID:{me.id}")
         except Exception as e:
-            print(f"Error conectando Telethon: {e}")
+            print(f"❌ Error conectando Telethon en post_init: {e}")
+            import traceback; traceback.print_exc()
+    else:
+        print("⚠️ user_client es None en post_init - Telethon no funcionará para >20MB")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔥 Bot JURADO MAESTRO + BOSS activo. Manda audio/video y escribe JURADOS VOTEN. x2 creditos por batalla. Identifica voces por timbre, soporta 2-4+ participantes, sin robo. Usa /status para ver cuota y ultimo archivo.")
@@ -499,7 +601,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"Timeout esperando ACTIVE, retornando ultimo estado")
             return uploaded
 
-        await update.message.reply_text("🔍 Analizando con Gemini 3.8 Flash... (si está saturado reintenta solo) 20-60 seg")
+        await update.message.reply_text("🔍 Analizando con Gemini 3.5 Flash-Lite... (si está saturado reintenta solo) 20-60 seg")
         g_file = await upload_and_wait(final_path)
         last_uploaded_files[chat_id] = g_file
 
@@ -625,25 +727,23 @@ TAREA 1: IDENTIFICAR VOCES POR TIMBRE - GENERAL PARA AUDIO Y VIDEO (CRITICO - AN
   * Revisa archivo 2 veces para confirmar que no te equivocas despues de que usuario te dijo quien es quien. GENERAL PARA AUDIO Y VIDEO.
 - No hagas robo/tongo. NUNCA evalue solo 1 voz si es batalla. NUNCA cambies el orden que dio el usuario. GENERAL.
 
-ESTILO DE RESPUESTA - NO ROBOT, PLAZA CHILENA - COMPARACIONES SOLO CUANDO SEA MUY SIMILAR (GENERAL PARA TODAS LAS CATEGORIAS):
+ESTILO DE RESPUESTA - NO ROBOT, PLAZA CHILENA - NOTAS OBJETIVAS Y JUSTAS (GENERAL PARA TODAS LAS CATEGORIAS):
 - No hables como robot tecnico. Habla como jurado de plaza chileno, natural, calle, con jerga, divertido.
 - Usa jerga chilena: brigido, piola, pulento, caleta, se paso, filete, etc, sin ser ofensivo extra. Es evaluacion artistica.
 - Pon ejemplos de lo que dijeron para justificar cada nota.
-- COMPARACIONES CON FREESTYLERS CONOCIDOS - GENERAL PARA TODAS LAS CATEGORIAS (FLOW, MORBO, INGENIO, PUNCHLINE, COHERENCIA, SKILLS, PUESTA EN ESCENA, RESPUESTAS):
-  * Puedes comparar con freestylers conocidos de nivel mundial (FMS, DEM, BDM, Red Bull, God Level, etc) cuando notes que el estilo es muy similar y aporte a la explicacion.
-  * Solo cuando sea muy parecido y consideres necesario, no en cada categoria. No es obligatorio comparar siempre.
-  * Conocidos: chilenos e internacionales de renombre. Usa tu conocimiento amplio.
-  * Aplica para todas las categorias por igual: si el flow es muy fluido puedes compararlo, si el morbo es muy picante y negro puedes compararlo, si el punchline es muy contundente, si el ingenio es muy rebuscado, si la coherencia es muy narrativa, si los skills son muy tecnicos, si la puesta en escena es muy teatral, si las respuestas son muy al hueso. En cualquiera de esas categorias, si ves similitud fuerte, comparas.
-  * No pongas comparacion forzada. Si no es muy similar, no compares. Prioriza explicar con jerga chilena que poner nombre por poner.
-- FLOW: describe como encaja en el beat, cambios de ritmo, si se sube bien.
-- MORBO: describe que tan picante, gracioso, sin filtro, que tan hiriente fue.
-- INGENIO: describe metaforas, doble sentido, creatividad.
-- PUNCHLINE: describe remate, si dolio, si cerro bien.
-- COHERENCIA: describe si mantuvo argumento, si no se contradijo.
-- SKILLS: describe tecnica, multis, referencias.
-- PUESTA EN ESCENA (solo video): describe energia, gestos, dominio escenario.
-- RESPUESTAS: describe si contesto altiro, si dio vuelta lo que le dijeron.
-- General para todas las categorias, mismo nivel de detalle, no solo flow.
+- NOTAS 100% OBJETIVAS Y PAREJAS - SIN FAVORITISMO:
+  * Usa TODO el rango 0.0 a 3.0, no solo 1.7-2.5. Se justo y parejo.
+  * 0.0-1.0 = MALO: se traba, no cae al beat, sin idea, principiante total, sin remate. Si fue malo, ponle bajo sin miedo.
+  * 1.0-1.8 = REGULAR BAJO: comun de plaza, sin brillo, rimas basicas.
+  * 1.8-2.2 = BUENO COMUN: bien de plaza, cumple, fluye, pero nada fuera de lo comun.
+  * 2.2-2.6 = MUY BUENO: solido, se nota nivel, buena tecnica, destaca.
+  * 2.6-3.0 = EXCELENTE / ELITE: nivel FMS, Red Bull, God Level. SOLO si realmente lo amerita. Si alguien hace una entrada mejor que Valles-T, mejor que Lokillo, mejor que Teorema en su prime, ahi ponle 2.8-3.0 y dilo.
+  * Si los 2 fueron malos, ponles notas bajas a los 2. Si uno fue muy bueno y otro muy malo, refleja esa diferencia grande (ej: 2.8 vs 1.0). Objetivo.
+- COMPARACIONES CON FREESTYLERS CONOCIDOS - SOLO CUANDO AMERITA Y JUSTO - EN TODAS LAS CATEGORIAS (FLOW, MORBO, INGENIO, PUNCHLINE, COHERENCIA, SKILLS, PUESTA EN ESCENA, RESPUESTAS):
+  * Cuando alguien haga algo MUY BUENO, comparable a un pro, dilo: "ese flow estuvo mejor que el de Lokillo en FMS", "esa entrada fue mejor que la de Valles-T en God Level", "ingenio nivel Teorema", "punch como el de Chuty", "morbo como el de Cacha", "respuesta como la de Acru", "skills como Nitro", etc.
+  * Si fue normal de principiante, comun de plaza, NO lo compares con top mundial. Solo di "flow comun de plaza, sin mucho brillo".
+  * Se justo en todas las categorias, no solo flow.
+- FLOW, MORBO, INGENIO, PUNCHLINE, COHERENCIA, SKILLS, PUESTA EN ESCENA, RESPUESTAS: todas con mismo nivel de detalle, no solo flow.
 
 REGLA DE ORO INQUEBRANTABLE: Cuenta cuantas voces distintas hay en TODO el archivo. MINIMO 2 VOCES SIEMPRE, NUNCA 1. Si es 1vs1 son 2, si usuario dijo que son 3 (ej: Voz1:Z Voz2:Y Voz3:X), entonces SON 3, no 2 ni 1. En CADA TOP pon EXACTAMENTE N entradas, mismo orden, sin excepcion. Si son 2 participantes, debes poner 2 lineas en FLOW, 2 en MORBO, etc. Si son 3 participantes, debes poner 3 lineas en FLOW, 3 en MORBO, 3 en INGENIO, etc. NUNCA dejes a nadie fuera, NUNCA califiques solo 1 si son 2, NUNCA solo 2 si son 3. Si te equivocas es robo/tongo y esta PROHIBIDO.
 
@@ -778,16 +878,22 @@ TAREA 1: IDENTIFICAR VOCES POR TIMBRE - GENERAL PARA AUDIO Y VIDEO (CRITICO - AN
   * Revisa archivo 2 veces para confirmar que no te equivocas despues de que usuario te dijo quien es quien. GENERAL PARA AUDIO Y VIDEO.
 - No hagas robo/tongo. NUNCA evalue solo 1 voz si es batalla. NUNCA cambies el orden que dio el usuario. GENERAL.
 
-ESTILO NO ROBOT, PLAZA CHILENA - COMPARACIONES SOLO CUANDO SEA MUY SIMILAR - GENERAL PARA TODAS LAS CATEGORIAS:
+ESTILO NO ROBOT, PLAZA CHILENA - NOTAS OBJETIVAS Y JUSTAS - GENERAL PARA TODAS LAS CATEGORIAS:
 - No hables como robot, habla como plaza chilena, natural, con jerga.
 - Usa jerga chilena: brigido, piola, pulento, caleta, se paso, etc.
 - Justifica con ejemplos de lo que dijeron.
-- COMPARACIONES CON FREESTYLERS CONOCIDOS - GENERAL PARA TODAS LAS CATEGORIAS (FLOW, MORBO, INGENIO, PUNCHLINE, COHERENCIA, SKILLS, RESPUESTAS):
-  * Puedes comparar con freestylers conocidos de FMS, DEM, BDM, Red Bull, God Level cuando el estilo sea muy similar y aporte.
-  * Solo cuando sea muy parecido y lo consideres necesario, no siempre, no en cada categoria obligatoriamente.
-  * Aplica para cualquier categoria: flow muy fluido, morbo muy picante, punchline muy contundente, ingenio muy rebuscado, coherencia muy narrativa, skills muy tecnicos, respuestas muy al hueso. Si ves similitud fuerte en cualquiera, comparas.
-  * Si no es muy similar, no compares. Mejor explica con jerga que poner nombre forzado.
-- FLOW, MORBO, INGENIO, PUNCHLINE, COHERENCIA, SKILLS, RESPUESTAS: todas con mismo nivel de detalle callejero, no solo flow.
+- NOTAS 100% OBJETIVAS Y PAREJAS - SIN FAVORITISMO:
+  * Usa TODO el rango 0.0 a 3.0, no solo 1.7-2.5. Se justo y parejo.
+  * 0.0-1.0 = MALO: se traba, no cae al beat, sin idea, principiante total.
+  * 1.0-1.8 = REGULAR BAJO: comun de plaza, sin brillo, rimas basicas.
+  * 1.8-2.2 = BUENO COMUN: bien de plaza, cumple.
+  * 2.2-2.6 = MUY BUENO: solido, destaca.
+  * 2.6-3.0 = EXCELENTE / ELITE: nivel FMS, Red Bull, God Level. SOLO si realmente lo amerita. Si alguien hace una entrada mejor que Valles-T, mejor que Lokillo, mejor que Teorema en su prime, ahi ponle 2.8-3.0 y dilo.
+  * Si los 2 fueron malos, ponles notas bajas a los 2. Si uno fue muy bueno y otro muy malo, refleja esa diferencia grande (ej: 2.8 vs 1.0).
+- COMPARACIONES CON FREESTYLERS CONOCIDOS - SOLO CUANDO AMERITA Y JUSTO - EN TODAS LAS CATEGORIAS:
+  * Cuando alguien haga algo MUY BUENO, comparable a un pro, dilo: "ese flow estuvo mejor que el de Lokillo", "esa entrada fue mejor que la de Valles-T", "ingenio nivel Teorema", etc.
+  * Si fue normal de principiante, comun de plaza, NO lo compares con top mundial.
+- FLOW, MORBO, INGENIO, PUNCHLINE, COHERENCIA, SKILLS, RESPUESTAS: todas con mismo nivel de detalle callejero.
 
 REGLA DE ORO INQUEBRANTABLE: Cuenta cuantas voces distintas hay en TODO el archivo. MINIMO 2 VOCES SIEMPRE, NUNCA 1. Si es 1vs1 son 2, si usuario dijo que son 3 (ej: Voz1:Z Voz2:Y Voz3:X), entonces SON 3, no 2 ni 1. En CADA TOP pon EXACTAMENTE N entradas, mismo orden, sin excepcion. Si son 2 participantes, debes poner 2 lineas en FLOW, 2 en MORBO, etc. Si son 3 participantes, debes poner 3 lineas en FLOW, 3 en MORBO, 3 en INGENIO, etc. NUNCA dejes a nadie fuera, NUNCA califiques solo 1 si son 2, NUNCA solo 2 si son 3. Si te equivocas es robo/tongo y esta PROHIBIDO.
 
@@ -928,24 +1034,48 @@ EN QUE MEJORAR:
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
                 await update.message.reply_text("🏆 JURADO BOSS contando puntos profundo, sin robo (credito 2/2)...")
                 boss_full = f"{boss_prompt_base}\n\nEvaluaciones del MAESTRO:\n{evaluaciones_texto}"
-                try:
-                    resp_boss = await generate_with_retry([boss_full])
-                    texto_boss = extract_text_safe(resp_boss)
-                    if texto_boss and texto_boss.strip():
-                        await update.message.reply_text(texto_boss)
-                        # Check quota after boss - avisar si quedan 2 creditos
-                        used_after, rem_after, lim_after, _ = get_quota_status()
-                        if rem_after == 2:
-                            await update.message.reply_text(f"⚠️ Te queda 1 audio/video más hoy (2 creditos de {lim_after}). Después se acaba lo gratis. Usa /status para ver. Si quieres más hoy, el bot usará lite (500-1000/dia, un poco menos preciso).")
-                        elif rem_after == 0:
-                            await update.message.reply_text(f"⛔ Se acabaron tus audios/videos gratis de hoy: {used_after//2} audios usados de {lim_after//2}. Hasta mañana no hay más gratis. Si necesitas más hoy, cambia a lite en MODELS_TO_TRY primero (500-1000/dia).")
-                        elif rem_after <= 4:
-                            await update.message.reply_text(f"⚠️ Te quedan {rem_after//2} audios/videos hoy ({rem_after} creditos de {lim_after}).")
-                    else:
-                        await update.message.reply_text(f"⚠️ BOSS no pudo generar tabla, pero maestro si evaluo.")
-                except Exception as e_boss:
-                    await update.message.reply_text(f"⚠️ BOSS fallo: {e_boss}")
+                boss_ok = False
+                for boss_try in range(3):  # 3 intentos max con rango hasta 5min como pidio user (60s, 180s, 300s)
+                    try:
+                        resp_boss = await generate_with_retry([boss_full], max_retries=3)
+                        texto_boss = extract_text_safe(resp_boss)
+                        if texto_boss and texto_boss.strip():
+                            await update.message.reply_text(texto_boss)
+                            boss_ok = True
+                            used_after, rem_after, lim_after, _ = get_quota_status()
+                            if rem_after == 2:
+                                await update.message.reply_text(f"⚠️ Te queda 1 audio/video más hoy (2 creditos de {lim_after}). Después se acaba lo gratis.")
+                            elif rem_after == 0:
+                                await update.message.reply_text(f"⛔ Se acabaron tus audios/videos gratis de hoy: {used_after//2} audios usados de {lim_after//2}. Hasta mañana no hay más gratis.")
+                            elif rem_after <= 4:
+                                await update.message.reply_text(f"⚠️ Te quedan {rem_after//2} audios/videos hoy ({rem_after} creditos de {lim_after}).")
+                            break
+                        else:
+                            await update.message.reply_text(f"⚠️ BOSS no pudo generar tabla, pero maestro si evaluo.")
+                            boss_ok = True
+                            break
+                    except Exception as e_boss:
+                        err = str(e_boss).lower()
+                        if "503" in err or "unavailable" in err or "high demand" in err or "overloaded" in err or "429" in err:
+                            wait_boss = [60, 180, 300][boss_try] + random.uniform(2, 5)
+                            print(f"BOSS 503 reintento {boss_try+1}/3 esperando {wait_boss:.1f}s...", flush=True)
+                            mins = int(wait_boss // 60)
+                            secs = int(wait_boss % 60)
+                            if mins > 0:
+                                await update.message.reply_text(f"⏳ BOSS saturado (503), reintentando {boss_try+1}/3 en {mins}m {secs}s... tiene mas rango ahora (hasta 5min) para aceptar")
+                            else:
+                                await update.message.reply_text(f"⏳ BOSS saturado (503), reintentando {boss_try+1}/3 en {secs}s...")
+                            await asyncio.sleep(wait_boss)
+                            continue
+                        else:
+                            await update.message.reply_text(f"⚠️ BOSS fallo: {e_boss}")
+                            boss_ok = True
+                            break
+                if not boss_ok:
+                    await update.message.reply_text("⚠️ BOSS saturado por alta demanda (503) después de 3 intentos con rango amplio (hasta 5min). Intenta de nuevo en 2-3 min con JURADOS VOTEN - las evaluaciones del MAESTRO ya quedaron guardadas arriba, no necesitas re-subir video.")
 
+        except Exception as e:
+            print(f"Error jurado maestro: {e}")
         except Exception as e:
             print(f"Error jurado maestro: {e}")
             import traceback
