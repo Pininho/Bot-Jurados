@@ -161,7 +161,7 @@ def get_audio_duration(input_path):
     return 0
 
 
-MODELS_TO_TRY = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-flash-latest"]  # REAL: modelos que existen y no estan baneados. 2.0-flash es el mas estable, lite tiene mas cuota y menos 503
+MODELS_TO_TRY = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.0-flash", "gemini-flash-latest"]  # REAL: modelos que existen y no estan baneados. 2.0-flash es el mas estable, lite tiene mas cuota y menos 503
 
 def extract_text_safe(resp):
     try:
@@ -823,9 +823,15 @@ FORMATO:
 
 GANADOR ABSOLUTO: [Nombre/Voz] con [total]/{max_puntos} porque [resumen profundo sin robo]
 
+🔥 MEJOR MOMENTO / MEJOR PATRON DE CADA UNO (4x4 - OBLIGATORIO CITAR TEXTUAL):
+- [Voz 1 / Nombre]: "[cita textual EXACTA de su mejor 4x4, la rima que más dolió, la más ingeniosa o más recordable]" -> Por qué este patrón fue el mejor, qué técnica usó (doble sentido, punch, referencia, flow, morbo)
+- [Voz 2 / Nombre]: "[su mejor 4x4 textual]" -> Por qué destacó
+- [Voz 3 si hay]: "[su mejor 4x4]" -> Por qué
+
 EN QUE MEJORAR:
-- [Voz 1]: [consejo]
+- [Voz 1]: [consejo callejero específico]
 - [Voz 2]: [consejo]
+- [Voz 3 si hay]: [consejo]
 
 🔥🔥🔥 FIN EVALUACION BOSS 🔥🔥🔥
 """
@@ -970,9 +976,15 @@ FORMATO:
 
 GANADOR ABSOLUTO: [Nombre/Voz] con [total]/{max_puntos} porque [resumen profundo sin robo]
 
+🔥 MEJOR MOMENTO / MEJOR PATRON DE CADA UNO (4x4 - OBLIGATORIO CITAR TEXTUAL):
+- [Voz 1 / Nombre]: "[cita textual EXACTA de su mejor 4x4, la rima que más dolió]" -> Por qué fue su mejor momento, qué hizo brígido
+- [Voz 2 / Nombre]: "[su mejor 4x4 textual]" -> Por qué destacó
+- [Voz 3 si hay]: "[su mejor 4x4]" -> Por qué
+
 EN QUE MEJORAR:
-- [Voz 1]: [consejo]
+- [Voz 1]: [consejo callejero específico]
 - [Voz 2]: [consejo]
+- [Voz 3 si hay]: [consejo]
 
 🔥🔥🔥 FIN EVALUACION BOSS 🔥🔥🔥
 """
