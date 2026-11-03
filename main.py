@@ -27,14 +27,23 @@ if GEMINI_API_KEY:
 user_client = None
 if API_ID and API_HASH:
     try:
-        api_id_int = int(API_ID)
-        if SESSION_STRING:
-            user_client = TelegramClient(StringSession(SESSION_STRING), api_id_int, API_HASH)
+        api_id_int = int(str(API_ID).strip())
+        session_clean = str(SESSION_STRING).strip() if SESSION_STRING else ""
+        # Remove possible newlines/spaces that Render sometimes adds
+        session_clean = session_clean.replace("\n", "").replace("\r", "").replace(" ", "")
+        if session_clean:
+            print(f"🔑 SESSION_STRING detectado, largo {len(session_clean)} - intentando crear client...")
+            user_client = TelegramClient(StringSession(session_clean), api_id_int, API_HASH.strip())
+            print(f"✅ Telethon client creado, session largo {len(session_clean)}")
         else:
-            user_client = TelegramClient('user_session', api_id_int, API_HASH)
+            print("⚠️ SESSION_STRING vacío - Telethon no podrá bajar >20MB")
+            user_client = TelegramClient('user_session', api_id_int, API_HASH.strip())
     except Exception as e:
-        print(f"Error Telethon: {e}")
+        print(f"❌ Error creando Telethon client: {e}")
+        import traceback; traceback.print_exc()
         user_client = None
+else:
+    print("⚠️ API_ID o API_HASH no configurados - Telethon deshabilitado")
 
 last_media = {}
 last_uploaded_files = {}
@@ -143,7 +152,7 @@ def get_audio_duration(input_path):
     return 0
 
 
-MODELS_TO_TRY = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]  # FINAL: FULL primero porque es esencial que le atine a quien es quien. Lite solo de respaldo cuando se acaba cuota gratis. No cambiar a lite primero.
+MODELS_TO_TRY = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.5-flash-lite", "gemini-flash-latest"]  # REAL: modelos que existen y no estan baneados. 2.0-flash es el mas estable, lite tiene mas cuota y menos 503
 
 def extract_text_safe(resp):
     try:
@@ -243,30 +252,111 @@ async def generate_with_retry(contents, max_retries=5):
 
 async def download_via_telethon(chat_id, message_id):
     if not user_client:
+        print("❌ Telethon: user_client no existe - falta SESSION_STRING, API_ID o API_HASH en Render")
         return None
     try:
-        await user_client.connect()
-        msg = await user_client.get_messages(chat_id, ids=message_id)
-        if msg and msg.media:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                path = await user_client.download_media(msg, tf.name)
-                return path
-    except Exception as e:
-        print(f"Telethon download error: {e}")
-    finally:
+        if not user_client.is_connected():
+            await user_client.connect()
+            print("✅ Telethon conectado para descarga")
+        
+        # ID del bot
+        bot_id = None
         try:
-            await user_client.disconnect()
+            if TELEGRAM_TOKEN and ":" in TELEGRAM_TOKEN:
+                bot_id = int(TELEGRAM_TOKEN.split(":")[0])
         except:
             pass
+
+        # 1. Buscar mensaje exacto en chat con el bot (privado)
+        if bot_id:
+            try:
+                print(f"🔍 Telethon: buscando msg {message_id} en bot_id {bot_id}")
+                msg = await user_client.get_messages(bot_id, ids=message_id)
+                if msg and getattr(msg, 'media', None):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                        path = await user_client.download_media(msg, tf.name)
+                        print(f"✅ Telethon downloaded (bot_id exacto) to {path} size {os.path.getsize(path)}")
+                        return path
+                else:
+                    print(f"⚠️ Telethon: no media en msg {message_id} via bot_id")
+            except Exception as e1:
+                print(f"❌ Telethon bot_id exacto fallo: {e1}")
+
+        # 2. Buscar por chat_id exacto (GRUPO - tu caso real)
+        try:
+            print(f"🔍 Telethon: buscando msg EXACTO {message_id} en grupo {chat_id}")
+            msg = await user_client.get_messages(chat_id, ids=message_id)
+            if msg and getattr(msg, 'media', None):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                    path = await user_client.download_media(msg, tf.name)
+                    print(f"✅ Telethon downloaded (grupo exacto) to {path} size {os.path.getsize(path)}")
+                    return path
+            else:
+                print(f"⚠️ Telethon: no media en msg {message_id} via chat_id grupo")
+        except Exception as e:
+            print(f"❌ Telethon grupo exacto fallo: {e}")
+            import traceback; traceback.print_exc()
+
+        # 3. Fallback: ultimos mensajes del grupo, solo si son recientes (<3 min)
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            print(f"🔍 Telethon: fallback buscando ultimos 20 en grupo {chat_id}")
+            entity = await user_client.get_entity(chat_id)
+            msgs = await user_client.get_messages(entity, limit=20)
+            for m in msgs:
+                if getattr(m, 'media', None):
+                    age = (now - m.date).total_seconds() if m.date else 9999
+                    print(f"  -> msg {m.id} age {age:.0f}s media={bool(m.media)}")
+                    if age < 180:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                            path = await user_client.download_media(m, tf.name)
+                            print(f"✅ Telethon downloaded (fallback grupo reciente {age:.0f}s) to {path}")
+                            return path
+                    else:
+                        print(f"⏩ Telethon: msg {m.id} viejo {age:.0f}s, saltando")
+                        break
+        except Exception as e:
+            print(f"❌ Telethon fallback grupo fallo: {e}")
+            import traceback; traceback.print_exc()
+
+        # 4. Fallback bot: ultimos del bot, recientes
+        if bot_id:
+            try:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                print(f"🔍 Telethon: fallback buscando ultimos 20 en bot {bot_id}")
+                msgs = await user_client.get_messages(bot_id, limit=20)
+                for m in msgs:
+                    if getattr(m, 'media', None):
+                        age = (now - m.date).total_seconds() if m.date else 9999
+                        if age < 180:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
+                                path = await user_client.download_media(m, tf.name)
+                                print(f"✅ Telethon downloaded (fallback bot reciente) to {path}")
+                                return path
+            except Exception as e:
+                print(f"❌ Telethon fallback bot fallo: {e}")
+
+        print(f"❌ Telethon: no media encontrado para {message_id} en ningun chat")
+    except Exception as e:
+        print(f"❌ Telethon download error general: {e}")
+        import traceback; traceback.print_exc()
     return None
 
 async def post_init(app):
     if user_client:
         try:
             await user_client.connect()
-            print("✅ Telethon user client conectado")
+            print("✅ Telethon user client conectado en post_init")
+            # Verificar que la session es válida
+            me = await user_client.get_me()
+            print(f"✅ Telethon logueado como: {me.first_name} (@{me.username}) ID:{me.id}")
         except Exception as e:
-            print(f"Error conectando Telethon: {e}")
+            print(f"❌ Error conectando Telethon en post_init: {e}")
+            import traceback; traceback.print_exc()
+    else:
+        print("⚠️ user_client es None en post_init - Telethon no funcionará para >20MB")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔥 Bot JURADO MAESTRO + BOSS activo. Manda audio/video y escribe JURADOS VOTEN. x2 creditos por batalla. Identifica voces por timbre, soporta 2-4+ participantes, sin robo. Usa /status para ver cuota y ultimo archivo.")
@@ -928,23 +1018,41 @@ EN QUE MEJORAR:
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
                 await update.message.reply_text("🏆 JURADO BOSS contando puntos profundo, sin robo (credito 2/2)...")
                 boss_full = f"{boss_prompt_base}\n\nEvaluaciones del MAESTRO:\n{evaluaciones_texto}"
-                try:
-                    resp_boss = await generate_with_retry([boss_full])
-                    texto_boss = extract_text_safe(resp_boss)
-                    if texto_boss and texto_boss.strip():
-                        await update.message.reply_text(texto_boss)
-                        # Check quota after boss - avisar si quedan 2 creditos
-                        used_after, rem_after, lim_after, _ = get_quota_status()
-                        if rem_after == 2:
-                            await update.message.reply_text(f"⚠️ Te queda 1 audio/video más hoy (2 creditos de {lim_after}). Después se acaba lo gratis. Usa /status para ver. Si quieres más hoy, el bot usará lite (500-1000/dia, un poco menos preciso).")
-                        elif rem_after == 0:
-                            await update.message.reply_text(f"⛔ Se acabaron tus audios/videos gratis de hoy: {used_after//2} audios usados de {lim_after//2}. Hasta mañana no hay más gratis. Si necesitas más hoy, cambia a lite en MODELS_TO_TRY primero (500-1000/dia).")
-                        elif rem_after <= 4:
-                            await update.message.reply_text(f"⚠️ Te quedan {rem_after//2} audios/videos hoy ({rem_after} creditos de {lim_after}).")
-                    else:
-                        await update.message.reply_text(f"⚠️ BOSS no pudo generar tabla, pero maestro si evaluo.")
-                except Exception as e_boss:
-                    await update.message.reply_text(f"⚠️ BOSS fallo: {e_boss}")
+                boss_ok = False
+                for boss_try in range(3):  # 3 intentos para BOSS porque es el que mas se satura con 503
+                    try:
+                        resp_boss = await generate_with_retry([boss_full], max_retries=5)
+                        texto_boss = extract_text_safe(resp_boss)
+                        if texto_boss and texto_boss.strip():
+                            await update.message.reply_text(texto_boss)
+                            boss_ok = True
+                            # Check quota after boss - avisar si quedan 2 creditos
+                            used_after, rem_after, lim_after, _ = get_quota_status()
+                            if rem_after == 2:
+                                await update.message.reply_text(f"⚠️ Te queda 1 audio/video más hoy (2 creditos de {lim_after}). Después se acaba lo gratis. Usa /status para ver. Si quieres más hoy, el bot usará lite (500-1000/dia, un poco menos preciso).")
+                            elif rem_after == 0:
+                                await update.message.reply_text(f"⛔ Se acabaron tus audios/videos gratis de hoy: {used_after//2} audios usados de {lim_after//2}. Hasta mañana no hay más gratis. Si necesitas más hoy, cambia a lite en MODELS_TO_TRY primero (500-1000/dia).")
+                            elif rem_after <= 4:
+                                await update.message.reply_text(f"⚠️ Te quedan {rem_after//2} audios/videos hoy ({rem_after} creditos de {lim_after}).")
+                            break
+                        else:
+                            await update.message.reply_text(f"⚠️ BOSS no pudo generar tabla, pero maestro si evaluo.")
+                            boss_ok = True
+                            break
+                    except Exception as e_boss:
+                        err = str(e_boss).lower()
+                        if "503" in err or "unavailable" in err or "high demand" in err or "overloaded" in err or "429" in err:
+                            wait_boss = (boss_try + 1) * 10 + random.uniform(2, 5)
+                            print(f"BOSS 503 reintento {boss_try+1}/3 esperando {wait_boss:.1f}s...")
+                            await update.message.reply_text(f"⏳ BOSS saturado (503), reintentando {boss_try+1}/3 en {wait_boss:.0f}s...")
+                            await asyncio.sleep(wait_boss)
+                            continue
+                        else:
+                            await update.message.reply_text(f"⚠️ BOSS fallo: {e_boss}")
+                            boss_ok = True
+                            break
+                if not boss_ok:
+                    await update.message.reply_text("⚠️ BOSS saturado por alta demanda (503). Intenta de nuevo en 1-2 min con JURADOS VOTEN - las evaluaciones del MAESTRO ya quedaron guardadas arriba, no necesitas re-subir video.")
 
         except Exception as e:
             print(f"Error jurado maestro: {e}")
