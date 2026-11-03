@@ -1,10 +1,16 @@
 import os
+import sys
+# Forzar logs sin buffer para que aparezcan en Render al instante
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+print(">>> INICIANDO main.py - imports...", flush=True)
 import re
 import asyncio
 import tempfile
 import time
 import subprocess
 import random
+print(">>> Imports basicos OK, cargando telegram...", flush=True)
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from google import genai
@@ -22,7 +28,7 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
-    print(f"✅ Gemini client creado correctamente")
+    print(f"✅ Gemini client creado correctamente", flush=True)
 
 user_client = None
 if API_ID and API_HASH:
@@ -32,18 +38,18 @@ if API_ID and API_HASH:
         # Remove possible newlines/spaces that Render sometimes adds
         session_clean = session_clean.replace("\n", "").replace("\r", "").replace(" ", "")
         if session_clean:
-            print(f"🔑 SESSION_STRING detectado, largo {len(session_clean)} - intentando crear client...")
+            print(f"🔑 SESSION_STRING detectado, largo {len(session_clean)} - intentando crear client...", flush=True)
             user_client = TelegramClient(StringSession(session_clean), api_id_int, API_HASH.strip())
-            print(f"✅ Telethon client creado, session largo {len(session_clean)}")
+            print(f"✅ Telethon client creado, session largo {len(session_clean)}", flush=True)
         else:
-            print("⚠️ SESSION_STRING vacío - Telethon no podrá bajar >20MB")
+            print("⚠️ SESSION_STRING vacío - Telethon no podrá bajar >20MB", flush=True)
             user_client = TelegramClient('user_session', api_id_int, API_HASH.strip())
     except Exception as e:
-        print(f"❌ Error creando Telethon client: {e}")
+        print(f"❌ Error creando Telethon client: {e}", flush=True)
         import traceback; traceback.print_exc()
         user_client = None
 else:
-    print("⚠️ API_ID o API_HASH no configurados - Telethon deshabilitado")
+    print("⚠️ API_ID o API_HASH no configurados - Telethon deshabilitado", flush=True)
 
 last_media = {}
 last_uploaded_files = {}
@@ -348,15 +354,15 @@ async def post_init(app):
     if user_client:
         try:
             await user_client.connect()
-            print("✅ Telethon user client conectado en post_init")
+            print("✅ Telethon user client conectado en post_init", flush=True)
             # Verificar que la session es válida
             me = await user_client.get_me()
-            print(f"✅ Telethon logueado como: {me.first_name} (@{me.username}) ID:{me.id}")
+            print(f"✅ Telethon logueado como: {me.first_name} (@{me.username}) ID:{me.id}", flush=True)
         except Exception as e:
-            print(f"❌ Error conectando Telethon en post_init: {e}")
+            print(f"❌ Error conectando Telethon en post_init: {e}", flush=True)
             import traceback; traceback.print_exc()
     else:
-        print("⚠️ user_client es None en post_init - Telethon no funcionará para >20MB")
+        print("⚠️ user_client es None en post_init - Telethon no funcionará para >20MB", flush=True)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔥 Bot JURADO MAESTRO + BOSS activo. Manda audio/video y escribe JURADOS VOTEN. x2 creditos por batalla. Identifica voces por timbre, soporta 2-4+ participantes, sin robo. Usa /status para ver cuota y ultimo archivo.")
