@@ -63,7 +63,7 @@ last_media_type = {}  # chat_id -> 'video' o 'audio'
 import json
 from datetime import datetime
 QUOTA_FILE = "/tmp/bot_quota.json"
-DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "20"))  # GRATIS: 20 creditos = 10 batallas x2 (justo tus 10 audios semanales). Si quieres mas, usa DAILY_LIMIT=1000 con flash-lite o API pagada. Aviso cuando quedan 2 creditos.
+DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "1000"))  # ACTUALIZADO Nov 2026: 3.5-flash-lite tiene 500-1000/dia gratis (250-500 batallas), antes 3.8-flash solo 20/dia. Si quieres limitar a 10 batallas, pon DAILY_LIMIT=20 en Render env vars.
 
 def load_quota():
     try:
@@ -161,7 +161,7 @@ def get_audio_duration(input_path):
     return 0
 
 
-MODELS_TO_TRY = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.0-flash", "gemini-flash-latest"]  # REAL: modelos que existen y no estan baneados. 2.0-flash es el mas estable, lite tiene mas cuota y menos 503
+MODELS_TO_TRY = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-flash-latest"]  # REAL: modelos que existen y no estan baneados. 2.0-flash es el mas estable, lite tiene mas cuota y menos 503
 
 def extract_text_safe(resp):
     try:
